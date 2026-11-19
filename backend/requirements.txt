@@ -1,0 +1,14 @@
+fastapi
+uvicorn[standard]
+sqlalchemy
+psycopg[binary]
+pgvector
+pydantic-settings
+python-dotenv
+groq
+pymupdf
+pdfplumber
+fastembed
+python-multipart
+alembic
+langchain-text-splitters
