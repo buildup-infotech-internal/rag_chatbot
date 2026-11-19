@@ -1,5 +1,8 @@
 
+import hashlib
 from pathlib import Path
+
+from sqlalchemy.exc import IntegrityError
 
 from app.db.session import SessionLocal
 from app.models.document import DocumentChunk
@@ -8,45 +11,80 @@ from app.services.pdf_processor import process_pdf
 from app.services.embedding_service import generate_document_embeddings
 
 
-def ingest_pdf(pdf_path: str):
-    filename = Path(pdf_path).name
+class UnreadablePDFError(Exception):
+    """The PDF parsed successfully but contains no extractable text."""
 
-    # 1. Extract PDF and generate chunks
-    chunks = process_pdf(pdf_path)
+
+def _result(document: Document, duplicate: bool) -> dict:
+    """Format the stable ingestion response for new and duplicate files."""
+    return {
+        "document_id": str(document.id),
+        "filename": document.filename,
+        "total_chunks": document.total_chunks,
+        "status": document.status,
+        "duplicate": duplicate,
+    }
+
+
+def ingest_pdf(
+    pdf_path: str,
+    *,
+    filename: str | None = None,
+    file_size: int | None = None,
+) -> dict:
+    """Extract, embed and persist a PDF; identical content is idempotent."""
+    path = Path(pdf_path)
+    filename = filename or path.name
+    file_size = file_size if file_size is not None else path.stat().st_size
+    digest = hashlib.sha256()
+    with path.open("rb") as source_file:
+        for block in iter(lambda: source_file.read(1024 * 1024), b""):
+            digest.update(block)
+    content_sha256 = digest.hexdigest()
+
+    lookup_db = SessionLocal()
+    try:
+        existing = lookup_db.query(Document).filter(
+            Document.content_sha256 == content_sha256
+        ).first()
+    finally:
+        lookup_db.close()
+    if existing is not None:
+        return _result(existing, duplicate=True)
+
+    # Keep CPU-heavy parsing and embedding outside a database transaction.
+    chunks = process_pdf(str(path))
 
     if not chunks:
-        raise ValueError("No readable text found in the PDF.")
+        raise UnreadablePDFError("No readable text found in the PDF.")
 
-    # 2. Generate embeddings
     texts = [chunk["content"] for chunk in chunks]
     embeddings = generate_document_embeddings(texts)
 
     if len(embeddings) != len(chunks):
-        raise ValueError("Embedding count does not match chunk count.")
+        raise RuntimeError("Embedding count does not match chunk count.")
 
     db = SessionLocal()
-
     try:
-        # 3. Create the parent document record
+        # A concurrent identical upload may have completed while embeddings ran.
+        existing = db.query(Document).filter(
+            Document.content_sha256 == content_sha256
+        ).first()
+        if existing is not None:
+            return _result(existing, duplicate=True)
+
         document = Document(
             filename=filename,
+            file_size=file_size,
+            content_sha256=content_sha256,
             status="processing",
             is_active=False,
             total_chunks=0
         )
-
         db.add(document)
         db.flush()
 
-        # 4. Remove old unlinked chunks for this test PDF
-        db.query(DocumentChunk).filter(
-            DocumentChunk.source_filename == filename,
-            DocumentChunk.document_id.is_(None)
-        ).delete(synchronize_session=False)
-
-        # 5. Link every new chunk to its document
         records = []
-
         for chunk, embedding in zip(chunks, embeddings):
             records.append(
                 DocumentChunk(
@@ -58,26 +96,24 @@ def ingest_pdf(pdf_path: str):
                     embedding=embedding
                 )
             )
-
         db.add_all(records)
 
-        # 6. Mark document as active after successful insertion
         document.total_chunks = len(records)
         document.status = "active"
         document.is_active = True
-
         db.commit()
-
-        return {
-            "document_id": str(document.id),
-            "filename": filename,
-            "total_chunks": len(records),
-            "status": document.status
-        }
-
+        return _result(document, duplicate=False)
+    except IntegrityError:
+        db.rollback()
+        # A concurrent upload of the same content may win the unique-index race.
+        existing = db.query(Document).filter(
+            Document.content_sha256 == content_sha256
+        ).first()
+        if existing is not None:
+            return _result(existing, duplicate=True)
+        raise
     except Exception:
         db.rollback()
         raise
-
     finally:
         db.close()

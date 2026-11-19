@@ -1,6 +1,9 @@
 
+from sqlalchemy import or_
+
 from app.db.session import SessionLocal
 from app.models.document import DocumentChunk
+from app.models.document_metadata import Document
 from app.services.embedding_service import generate_query_embedding
 
 
@@ -19,7 +22,14 @@ def retrieve_relevant_chunks(query: str, top_k: int = 5):
                     query_embedding
                 ).label("distance")
             )
+            .outerjoin(Document, Document.id == DocumentChunk.document_id)
             .filter(DocumentChunk.embedding.isnot(None))
+            .filter(
+                or_(
+                    DocumentChunk.document_id.is_(None),
+                    Document.is_active.is_(True),
+                )
+            )
             .order_by("distance")
             .limit(top_k)
             .all()

@@ -2,7 +2,7 @@
 import uuid
 from datetime import datetime
 
-from sqlalchemy import DateTime, String, BigInteger, Boolean, func
+from sqlalchemy import DateTime, String, BigInteger, Boolean, Index, func
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -11,6 +11,9 @@ from app.db.base import Base
 
 class Document(Base):
     __tablename__ = "documents"
+    __table_args__ = (
+        Index("uq_documents_content_sha256", "content_sha256", unique=True),
+    )
 
     id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True),
@@ -30,6 +33,11 @@ class Document(Base):
 
     file_size: Mapped[int | None] = mapped_column(
         BigInteger,
+        nullable=True
+    )
+
+    content_sha256: Mapped[str | None] = mapped_column(
+        String(64),
         nullable=True
     )
 

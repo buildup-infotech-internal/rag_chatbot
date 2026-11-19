@@ -7,6 +7,9 @@ from app.db.base import Base
 from app.db.database import engine
 from app.models.document import DocumentChunk
 from app.models.document_metadata import Document
+from app.models.chat_session import ChatSession
+from app.models.chat_message import ChatMessage
+from app.models.feedback import Feedback
 
 config = context.config
 
